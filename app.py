@@ -645,7 +645,7 @@ else:
                     return {"iceServers": ice_servers}
                 
                 
-                if mode == "Webcam (Live)":
+            if mode == "Webcam (Live)":
                     st.info("Start your webcam (webrtc). Alerts will be sent when rules fire.")
                 
                     rtc_conf = get_rtc_configuration()
@@ -714,6 +714,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown("<div style='padding:14px; text-align:center; color:#9aa7b8; margin-top:18px;'>Click on Icon to get notified by telegram </div>", unsafe_allow_html=True)
+
 
 
 
