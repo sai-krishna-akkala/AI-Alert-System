@@ -1,9 +1,8 @@
 streamlit
 streamlit-webrtc
-opencv-python
-torch
-pillow
-python-dotenv
+opencv-python-headless
+numpy
+requests
 bcrypt
 email-validator
-requests
+python-dotenv
