@@ -635,16 +635,40 @@ else:
                 st.rerun()
         with col_left:
             mode = st.radio("Stream Source", ["Webcam (Live)", "Upload Video"], horizontal=True)
-            if mode == "Webcam (Live)":
-                st.info("Start your webcam (webrtc). Alerts will be sent when rules fire.")
-                rtc_conf = RTCConfiguration({"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]})
-                webrtc_streamer(
-                    key="live_stream",
-                    rtc_configuration=rtc_conf,
-                    video_transformer_factory=DetectorTransformer,
-                    media_stream_constraints={"video": True, "audio": False},
-                    async_transform=True,
-                )
+            def get_rtc_configuration():
+                    # Multiple STUN servers improves connection success
+                    ice_servers = [
+                        {"urls": ["stun:stun.l.google.com:19302"]},
+                        {"urls": ["stun:stun1.l.google.com:19302"]},
+                        {"urls": ["stun:global.stun.twilio.com:3478?transport=udp"]},
+                    ]
+                    return {"iceServers": ice_servers}
+                
+                
+                if mode == "Webcam (Live)":
+                    st.info("Start your webcam (webrtc). Alerts will be sent when rules fire.")
+                
+                    rtc_conf = get_rtc_configuration()
+                
+                    try:
+                        webrtc_streamer(
+                            key="live_stream",
+                            rtc_configuration=rtc_conf,
+                            video_transformer_factory=DetectorTransformer,
+                            media_stream_constraints={"video": True, "audio": False},
+                            async_transform=True,
+                        )
+                    except Exception as e:
+                        st.error(
+                            "Live stream failed to start. This can happen when WebRTC cannot establish a connection "
+                            "(STUN/TURN problem or network restrictions)."
+                        )
+                        st.write("Error (hidden):", str(e))
+                        st.info(
+                            "Try:\n"
+                            "• Adding a TURN server (recommended) and put its username/credential in Streamlit Secrets.\n"
+                            "• Or try from a different network (some networks block UDP)."
+                        )
             else:
                 st.info("Upload a video file (mp4) to process.")
                 uploaded = st.file_uploader("Upload video", type=["mp4","mov","avi","mkv"])
@@ -690,6 +714,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown("<div style='padding:14px; text-align:center; color:#9aa7b8; margin-top:18px;'>Click on Icon to get notified by telegram </div>", unsafe_allow_html=True)
+
 
 
 
