@@ -1,0 +1,9 @@
+streamlit
+streamlit-webrtc
+opencv-python
+torch
+pillow
+python-dotenv
+bcrypt
+email-validator
+requests
