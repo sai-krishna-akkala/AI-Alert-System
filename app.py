@@ -476,8 +476,9 @@ if not st.session_state.get("user"):
         with col_right:
             st.image(
                 "assets/ai_mon.png",
-                use_container_width=True
-            )
+                 width="stretch"
+             )
+
 
 
 
@@ -692,6 +693,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown("<div style='padding:14px; text-align:center; color:#9aa7b8; margin-top:18px;'>Click on Icon to get notified by telegram </div>", unsafe_allow_html=True)
+
 
 
 
