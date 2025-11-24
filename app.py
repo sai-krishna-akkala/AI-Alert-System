@@ -1,15 +1,9 @@
-# streamlit_app.py
-"""
-Clean Streamlit CCTV app (no hero banner).
-- Sidebar (when logged out): Home, Register, Login, Settings (public)
-- Sidebar (when logged in): Monitor, Settings, Logout
-- Public Settings page available before login (persistent to settings.json)
-- Register -> OTP -> Monitor
-- Login -> Monitor
-- Alerts: crowd threshold (immediate) OR weapon/violence continuous durations
-- Safe DB migrations, st.query_params avoided for GetStart (removed), st.rerun() used
-- Uses uploaded file path (HERO_IMG) if needed elsewhere
-"""
+# Patched app.py — Streamlit-ready for Cloud (Python 3.10)
+# - Uses st.secrets.get so missing keys won't crash
+# - Valid STUN servers + optional TURN from secrets
+# - Replaces use_container_width with width="stretch"
+# - HERO image = assets/ai_mon.png (as requested)
+# - Assumes requirements: opencv-python-headless, streamlit-webrtc, ultralytics (optional)
 
 import os
 import time
@@ -22,7 +16,7 @@ import cv2
 import numpy as np
 import requests
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 from email.message import EmailMessage
 import smtplib
 from email_validator import validate_email, EmailNotValidError
@@ -31,15 +25,13 @@ from pathlib import Path
 # -------------------------
 # CONFIG / ENV
 # -------------------------
-# Email credentials
-SMTP_EMAIL = st.secrets["SMTP_EMAIL"]
-SMTP_APP_PASSWORD = st.secrets["SMTP_APP_PASSWORD"]
+# Use .get so app starts even when secrets are not configured
+SMTP_EMAIL = st.secrets.get("SMTP_EMAIL", "")
+SMTP_APP_PASSWORD = st.secrets.get("SMTP_APP_PASSWORD", "")
 
-# Telegram credentials
-TELEGRAM_BOT_TOKEN = st.secrets["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
+TELEGRAM_BOT_TOKEN = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
-# Model paths
 CROWD_MODEL_PATH = st.secrets.get("CROWD_MODEL_PATH", "People_count_model/best.pt")
 WEAPON_MODEL_PATH = st.secrets.get("WEAPON_MODEL_PATH", "weapon_detection_model/best1.pt")
 
@@ -47,15 +39,15 @@ DB_PATH = "users.db"
 SETTINGS_PATH = "settings.json"
 SESSION_TOKEN_FILE = ".session_token"
 
-# Uploaded/asset image path from conversation (kept available)
-HERO_IMG = "assets/ai_mon.jpg"
+# HERO image provided by user: ai_mon.png
+HERO_IMG = "assets/ai_mon.png"
 
 # Default settings
 DEFAULT_SETTINGS = {
     "crowd_threshold": 1000,
     "weapon_duration": 3.0,
     "violence_duration": 3.0,
-    "alert_cooldown": 20
+    "alert_cooldown": 20,
 }
 
 # load/save settings
@@ -72,6 +64,7 @@ def load_settings():
             return DEFAULT_SETTINGS.copy()
     else:
         return DEFAULT_SETTINGS.copy()
+
 
 def save_settings(s):
     with open(SETTINGS_PATH, "w") as f:
@@ -102,13 +95,13 @@ CREATE TABLE IF NOT EXISTS otps (
 )
 """)
 
-# minimal alerts table, we'll migrate columns safely
 cur.execute("""
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT
 )
 """)
 con.commit()
+
 
 def safe_add_column(table, column_def):
     try:
@@ -125,6 +118,7 @@ safe_add_column("alerts", "snapshot_path TEXT")
 # -------------------------
 # UTILITIES: email, telegram, otp, alerts
 # -------------------------
+
 def send_email_html(to_email, subject, html_body, text_body=None):
     if not SMTP_EMAIL or not SMTP_APP_PASSWORD:
         return False
@@ -144,6 +138,7 @@ def send_email_html(to_email, subject, html_body, text_body=None):
         print("Email error:", e)
         return False
 
+
 def send_telegram_alert(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured.")
@@ -151,17 +146,20 @@ def send_telegram_alert(text):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-        return r.status_code in (200,201)
+        return r.status_code in (200, 201)
     except Exception as e:
         print("Telegram error:", e)
         return False
 
+
 def gen_otp(n=6):
     return "".join(random.choices(string.digits, k=n))
+
 
 def save_otp(email, otp):
     cur.execute("INSERT INTO otps (email, otp, created_at) VALUES (?, ?, ?)", (email, otp, int(time.time())))
     con.commit()
+
 
 def verify_otp(email, otp, expiry=300):
     cur.execute("SELECT otp, created_at FROM otps WHERE email=? ORDER BY created_at DESC LIMIT 1", (email,))
@@ -173,6 +171,7 @@ def verify_otp(email, otp, expiry=300):
         return False
     return saved == otp
 
+
 def log_alert(alert_type, details, snapshot_path=None):
     cur.execute("INSERT INTO alerts (type, details, created_at, snapshot_path) VALUES (?, ?, ?, ?)",
                 (alert_type, details, int(time.time()), snapshot_path))
@@ -181,6 +180,7 @@ def log_alert(alert_type, details, snapshot_path=None):
 # -------------------------
 # AUTH helpers
 # -------------------------
+
 def register_user(email, password):
     try:
         v = validate_email(email)
@@ -195,9 +195,11 @@ def register_user(email, password):
     except Exception as e:
         return False, f"DB Error: {e}"
 
+
 def mark_verified(email):
     cur.execute("UPDATE users SET verified=1 WHERE email=?", (email,))
     con.commit()
+
 
 def check_login(email, password):
     cur.execute("SELECT password_hash, verified FROM users WHERE email=?", (email,))
@@ -211,9 +213,11 @@ def check_login(email, password):
         return False, "Not verified"
     return True, "OK"
 
+
 def set_remember_token(email, token):
     cur.execute("UPDATE users SET remember_token=? WHERE email=?", (token, email))
     con.commit()
+
 
 def get_user_by_token(token):
     cur.execute("SELECT email FROM users WHERE remember_token=?", (token,))
@@ -474,8 +478,10 @@ if not st.session_state.get("user"):
 
         # RIGHT — image only
         with col_right:
-            st.image("assets/ai_mon.jpg", width="stretch")
-
+            if os.path.exists(HERO_IMG):
+                st.image(HERO_IMG, width="stretch")
+            else:
+                st.warning("Hero image not found. Please upload assets/ai_mon.png to the repo.")
 
 
 
@@ -635,40 +641,61 @@ else:
                 st.rerun()
         with col_left:
             mode = st.radio("Stream Source", ["Webcam (Live)", "Upload Video"], horizontal=True)
+
             def get_rtc_configuration():
-                    # Multiple STUN servers improves connection success
-                    ice_servers = [
-                        {"urls": ["stun:stun.l.google.com:19302"]},
-                        {"urls": ["stun:stun1.l.google.com:19302"]},
-                        {"urls": ["stun:global.stun.twilio.com:3478?transport=udp"]},
-                    ]
-                    return {"iceServers": ice_servers}
-                
-                
+                # Valid STUN servers
+                ice_servers = [
+                    {"urls": ["stun:stun.l.google.com:19302"]},
+                    {"urls": ["stun:stun1.l.google.com:19302"]},
+                    {"urls": ["stun:stun2.l.google.com:19302"]},
+                    {"urls": ["stun:stun3.l.google.com:19302"]},
+                ]
+
+                # Optional TURN from secrets
+                turn_url = st.secrets.get("TURN_URL", "")
+                turn_user = st.secrets.get("TURN_USERNAME", "")
+                turn_cred = st.secrets.get("TURN_CREDENTIAL", "")
+                if turn_url and turn_user and turn_cred:
+                    ice_servers.append({
+                        "urls": [turn_url],
+                        "username": turn_user,
+                        "credential": turn_cred,
+                    })
+                else:
+                    # public fallback (may be unreliable)
+                    ice_servers.append({
+                        "urls": ["turn:openrelay.metered.ca:80"],
+                        "username": "openrelayproject",
+                        "credential": "openrelayproject",
+                    })
+
+                return {"iceServers": ice_servers}
+
+
             if mode == "Webcam (Live)":
-                    st.info("Start your webcam (webrtc). Alerts will be sent when rules fire.")
-                
-                    rtc_conf = get_rtc_configuration()
-                
-                    try:
-                        webrtc_streamer(
-                            key="live_stream",
-                            rtc_configuration=rtc_conf,
-                            video_transformer_factory=DetectorTransformer,
-                            media_stream_constraints={"video": True, "audio": False},
-                            async_transform=True,
-                        )
-                    except Exception as e:
-                        st.error(
-                            "Live stream failed to start. This can happen when WebRTC cannot establish a connection "
-                            "(STUN/TURN problem or network restrictions)."
-                        )
-                        st.write("Error (hidden):", str(e))
-                        st.info(
-                            "Try:\n"
-                            "• Adding a TURN server (recommended) and put its username/credential in Streamlit Secrets.\n"
-                            "• Or try from a different network (some networks block UDP)."
-                        )
+                st.info("Start your webcam (webrtc). Alerts will be sent when rules fire.")
+
+                rtc_conf = get_rtc_configuration()
+
+                try:
+                    webrtc_streamer(
+                        key="live_stream",
+                        rtc_configuration=rtc_conf,
+                        video_transformer_factory=DetectorTransformer,
+                        media_stream_constraints={"video": True, "audio": False},
+                        async_transform=True,
+                    )
+                except Exception as e:
+                    st.error(
+                        "Live stream failed to start. This can happen when WebRTC cannot establish a connection "
+                        "(STUN/TURN problem or network restrictions)."
+                    )
+                    st.write("Error (hidden):", str(e))
+                    st.info(
+                        "Try:\n"
+                        "• Adding a TURN server (recommended) and put its username/credential in Streamlit Secrets.\n"
+                        "• Or try from a different network (some networks block UDP)."
+                    )
             else:
                 st.info("Upload a video file (mp4) to process.")
                 uploaded = st.file_uploader("Upload video", type=["mp4","mov","avi","mkv"])
@@ -688,7 +715,7 @@ else:
                             def to_ndarray(self, format="bgr24"):
                                 return frame
                         out = transformer.transform(F())
-                        placeholder.image(out, channels="RGB", use_container_width=True)
+                        placeholder.image(out, channels="RGB", width="stretch")
                         time.sleep(delay)
                     cap.release()
                     placeholder.empty()
@@ -714,10 +741,4 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown("<div style='padding:14px; text-align:center; color:#9aa7b8; margin-top:18px;'>Click on Icon to get notified by telegram </div>", unsafe_allow_html=True)
-
-
-
-
-
-
 
