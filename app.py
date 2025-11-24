@@ -48,7 +48,7 @@ SETTINGS_PATH = "settings.json"
 SESSION_TOKEN_FILE = ".session_token"
 
 # Uploaded/asset image path from conversation (kept available)
-HERO_IMG = r"C:\Users\User\OneDrive\Documents\croed_dtection_project\assets\ai_mon.jpg"
+HERO_IMG = "assets/ai_mon.jpg"
 
 # Default settings
 DEFAULT_SETTINGS = {
@@ -692,4 +692,5 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 st.markdown("<div style='padding:14px; text-align:center; color:#9aa7b8; margin-top:18px;'>Click on Icon to get notified by telegram </div>", unsafe_allow_html=True)
+
 
