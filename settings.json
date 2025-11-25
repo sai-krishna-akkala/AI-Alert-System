@@ -1,0 +1,6 @@
+{
+  "crowd_threshold": 1000,
+  "weapon_duration": 3.0,
+  "violence_duration": 3.0,
+  "alert_cooldown": 20
+}
