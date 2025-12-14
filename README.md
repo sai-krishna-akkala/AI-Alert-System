@@ -27,8 +27,9 @@ The AI Alert System is a real-time intelligent monitoring application that detec
   7.Streamlit : Deployment
   
 ## System Architecture
+![AI Alert System Architecture](assets/Architecture.png)
 
-  Input Module – Captures live data (camera feed / video input)
+  Input Modules – Captures live data (camera feed / video input)
   
   Preprocessing Module – Cleans and prepares data for analysis
   
