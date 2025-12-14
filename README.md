@@ -1,7 +1,7 @@
 # AI-Alert-System
 ## Overview
 The AI Alert System is a real-time intelligent monitoring application that detects abnormal or critical conditions and triggers immediate alerts. It reduces the need for manual supervision by automatically analyzing incoming data and responding to risk patterns as they occur.
-![Home Page](assets/Home_page.png)
+![Home Page](assets/home_page.png)
 ## Key Features
   ⚡ Real-time Monitoring – Continuously observes live input streams
   
