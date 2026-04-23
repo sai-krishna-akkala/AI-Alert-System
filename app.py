@@ -1,487 +1,268 @@
-# streamlit_app.py
 """
-Clean Streamlit CCTV app prepared for Render deployment.
-All Windows paths removed and replaced with relative paths.
-Environment variables read using os.getenv (Render-friendly).
-All functionalities preserved: OTP, Email, Telegram, Alerts, YOLO, WebRTC.
+Code Review Autopilot — Streamlit Dashboard
+
+A read-only dashboard that displays PR reviews stored by the review bot.
+No manual PR analysis triggers — data comes from the shared SQLite / Postgres store.
+
+Run:
+    streamlit run app.py
 """
+
+from __future__ import annotations
 
 import os
-import time
-import json
-import random
-import string
-import sqlite3
-import bcrypt
-import cv2
-import numpy as np
-import requests
+from datetime import datetime, timedelta
+
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-from email.message import EmailMessage
-import smtplib
-from email_validator import validate_email, EmailNotValidError
-from pathlib import Path
+from dotenv import load_dotenv
 
-# -------------------------
-# CONFIG / ENV (Render Compatible)
-# -------------------------
+load_dotenv()
 
-# These must be added in Render → Environment Variables
-SMTP_EMAIL = os.getenv("SMTP_EMAIL")
-SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+from src.services.storage_service import get_storage
 
-# Model paths (relative paths inside repo)
-CROWD_MODEL_PATH = os.getenv("CROWD_MODEL_PATH", "People_count_model/best.pt")
-WEAPON_MODEL_PATH = os.getenv("WEAPON_MODEL_PATH", "weapon_detection_model/best1.pt")
+# ── Page config ──────────────────────────────────────────────────────────────
 
-DB_PATH = "users.db"
-SETTINGS_PATH = "settings.json"
-SESSION_TOKEN_FILE = ".session_token"
-
-# LOCAL ASSET (works on Render)
-HERO_IMG = "assets/ai_mon.jpg"   # MUST exist inside repo
-
-# Default settings
-DEFAULT_SETTINGS = {
-    "crowd_threshold": 1000,
-    "weapon_duration": 3.0,
-    "violence_duration": 3.0,
-    "alert_cooldown": 20
-}
-
-def load_settings():
-    if os.path.exists(SETTINGS_PATH):
-        try:
-            with open(SETTINGS_PATH, "r") as f:
-                data = json.load(f)
-            for k,v in DEFAULT_SETTINGS.items():
-                if k not in data:
-                    data[k] = v
-            return data
-        except:
-            return DEFAULT_SETTINGS.copy()
-    return DEFAULT_SETTINGS.copy()
-
-def save_settings(s):
-    with open(SETTINGS_PATH, "w") as f:
-        json.dump(s, f, indent=2)
-
-settings = load_settings()
-
-# -------------------------
-# DATABASE (sqlite)
-# -------------------------
-con = sqlite3.connect(DB_PATH, check_same_thread=False)
-cur = con.cursor()
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    email TEXT PRIMARY KEY,
-    password_hash BLOB,
-    verified INTEGER DEFAULT 0,
-    remember_token TEXT
+st.set_page_config(
+    page_title="Code Review Autopilot",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
-""")
 
-cur.execute("""
-CREATE TABLE IF NOT EXISTS otps (
-    email TEXT,
-    otp TEXT,
-    created_at INTEGER
+# ── Custom CSS ───────────────────────────────────────────────────────────────
+
+st.markdown(
+    """
+    <style>
+    /* tighter spacing */
+    .block-container { padding-top: 1.5rem; }
+
+    /* decision badges */
+    .badge-approve  { background:#22c55e; color:#fff; padding:4px 12px; border-radius:12px; font-weight:700; }
+    .badge-needs    { background:#f59e0b; color:#fff; padding:4px 12px; border-radius:12px; font-weight:700; }
+    .badge-reject   { background:#ef4444; color:#fff; padding:4px 12px; border-radius:12px; font-weight:700; }
+
+    /* risk colours */
+    .risk-low      { color:#22c55e; font-weight:700; }
+    .risk-medium   { color:#f59e0b; font-weight:700; }
+    .risk-high     { color:#f97316; font-weight:700; }
+    .risk-critical { color:#ef4444; font-weight:700; }
+
+    /* card look */
+    .review-card {
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 10px;
+        padding: 1.2rem;
+        margin-bottom: 1rem;
+        background: rgba(255,255,255,0.03);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS alerts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT
-)
-""")
-
-con.commit()
-
-def safe_add_column(table, col):
-    try:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
-        con.commit()
-    except:
-        pass
-
-safe_add_column("alerts","type TEXT")
-safe_add_column("alerts","details TEXT")
-safe_add_column("alerts","created_at INTEGER")
-safe_add_column("alerts","snapshot_path TEXT")
-
-# -------------------------
-# EMAIL + TELEGRAM
-# -------------------------
-
-def send_email_html(to_email, subject, html, text=None):
-    if not SMTP_EMAIL or not SMTP_APP_PASSWORD:
-        print("Email not configured")
-        return False
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = subject
-        msg["From"] = SMTP_EMAIL
-        msg["To"] = to_email
-        if text:
-            msg.set_content(text)
-        msg.add_alternative(html, subtype="html")
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-            s.login(SMTP_EMAIL, SMTP_APP_PASSWORD)
-            s.send_message(msg)
-        return True
-    except Exception as e:
-        print("Email error:", e)
-        return False
-
-def send_telegram_alert(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured.")
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id":TELEGRAM_CHAT_ID,"text":text})
-        return True
-    except:
-        return False
-
-# -------------------------
-# OTP + AUTH
-# -------------------------
-
-def gen_otp():
-    return "".join(random.choices(string.digits, k=6))
-
-def save_otp(email, otp):
-    cur.execute("INSERT INTO otps (email, otp, created_at) VALUES (?,?,?)",
-                (email, otp, int(time.time())))
-    con.commit()
-
-def verify_otp(email, otp):
-    cur.execute("SELECT otp, created_at FROM otps WHERE email=? ORDER BY created_at DESC LIMIT 1",(email,))
-    row = cur.fetchone()
-    if not row: return False
-    saved, ts = row
-    if time.time() - ts > 300: return False
-    return saved == otp
-
-def register_user(email,pwd):
-    try:
-        v = validate_email(email)
-        email = v.email
-    except Exception as e:
-        return False, str(e)
-
-    h = bcrypt.hashpw(pwd.encode(), bcrypt.gensalt())
-    try:
-        cur.execute("INSERT OR REPLACE INTO users (email,password_hash,verified) VALUES (?,?,0)",
-                    (email, h))
-        con.commit()
-        return True, "Registered"
-    except Exception as e:
-        return False, str(e)
-
-def check_login(email,pwd):
-    cur.execute("SELECT password_hash,verified FROM users WHERE email=?",(email,))
-    row = cur.fetchone()
-    if not row: return False, "Account not found"
-    h, verified = row
-    if not bcrypt.checkpw(pwd.encode(), h):
-        return False, "Wrong password"
-    if verified == 0:
-        return False, "Account not verified"
-    return True, ""
 
 
-# -------------------------
-# YOLO MODELS
-# -------------------------
-try:
-    from ultralytics import YOLO
-except:
-    YOLO = None
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-@st.cache_resource
-def load_models():
-    crowd = YOLO(CROWD_MODEL_PATH) if YOLO else None
-    weapon = YOLO(WEAPON_MODEL_PATH) if YOLO else None
-    return crowd, weapon
+def _decision_badge(decision: str) -> str:
+    cls = {"Approve": "badge-approve", "Needs Changes": "badge-needs", "Reject": "badge-reject"}.get(
+        decision, "badge-needs"
+    )
+    return f'<span class="{cls}">{decision}</span>'
 
-crowd_model, weapon_model = load_models()
 
-# -------------------------
-# Video transformer (WebRTC)
-# -------------------------
+def _risk_span(level: str) -> str:
+    cls = {"Low": "risk-low", "Medium": "risk-medium", "High": "risk-high", "Critical": "risk-critical"}.get(
+        level, ""
+    )
+    return f'<span class="{cls}">{level}</span>'
 
-class DetectorTransformer(VideoTransformerBase):
 
-    def __init__(self):
-        self.last_alert = 0
-        self.first_seen = {"weapon":None,"violence":None}
-        self.alerted = {"weapon":False,"violence":False}
+def _severity_icon(sev: str) -> str:
+    return {"High": "🔴", "Medium": "🟡", "Low": "🟢"}.get(sev, "⚪")
 
-    def transform(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        vis = img.copy()
-        now = time.time()
 
-        crowd_count = 0
-        weapon_detected = False
-        violence_detected = False
-        labels_found = []
+# ── Sidebar filters ─────────────────────────────────────────────────────────
 
-        # CROWD
-        if crowd_model:
-            try:
-                r = crowd_model(img, verbose=False)
-                if len(r) > 0:
-                    boxes = r[0].boxes.xyxy.cpu().numpy()
-                    crowd_count = len(boxes)
-                    for x1,y1,x2,y2 in boxes:
-                        cv2.rectangle(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,255,0),2)
-            except:
-                pass
+def _sidebar_filters() -> dict:
+    st.sidebar.title("🤖 Code Review Autopilot")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Filters")
 
-        # WEAPON & VIOLENCE
-        if weapon_model:
-            try:
-                rs = weapon_model(img, conf=0.45)
-                if len(rs) > 0:
-                    r = rs[0]
-                    if hasattr(r,"boxes"):
-                        for box in r.boxes:
-                            cls = int(box.cls)
-                            conf = float(box.conf)
-                            x1,y1,x2,y2 = box.xyxy[0].cpu().numpy()
-                            name = weapon_model.names[cls].lower()
+    # We load all reviews first so we can derive filter options
+    storage = get_storage()
+    all_reviews = storage.load_review_results()
 
-                            if "violence" in name:
-                                violence_detected = True
-                                cv2.rectangle(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,0,255),3)
-                                cv2.putText(vis,"Violence",(int(x1),int(y1)-5),
-                                            cv2.FONT_HERSHEY_SIMPLEX,0.8,(0,0,255),2)
+    repos = sorted({r.get("repo", "") for r in all_reviews if r.get("repo")})
+    selected_repo = st.sidebar.selectbox("Repository", ["All"] + repos)
 
-                            elif any(w in name for w in ["gun","knife","weapon"]):
-                                weapon_detected = True
-                                labels_found.append(name)
-                                cv2.rectangle(vis,(int(x1),int(y1)),(int(x2),int(y2)),(0,0,255),3)
-                                cv2.putText(vis,"Weapon",(int(x1),int(y1)-5),
-                                            cv2.FONT_HERSHEY_SIMPLEX,0.8,(0,0,255),2)
-            except:
-                pass
+    risk_levels = ["All", "Low", "Medium", "High", "Critical"]
+    selected_risk = st.sidebar.selectbox("Risk Level", risk_levels)
 
-        # HEADER
-        cv2.rectangle(vis,(0,0),(vis.shape[1],50),(0,0,0),-1)
-        cv2.putText(vis, f"Crowd:{crowd_count} | Weapon:{weapon_detected} | Violence:{violence_detected}",
-                    (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255,255,255),2)
+    decisions = ["All", "Approve", "Needs Changes", "Reject"]
+    selected_decision = st.sidebar.selectbox("Decision", decisions)
 
-        # ALERT RULES
-        crowd_threshold = settings["crowd_threshold"]
-        wd = settings["weapon_duration"]
-        vd = settings["violence_duration"]
-        cooldown = settings["alert_cooldown"]
+    date_range = st.sidebar.date_input(
+        "Date range",
+        value=(datetime.now() - timedelta(days=30), datetime.now()),
+    )
 
-        # CROWD
-        if crowd_count > crowd_threshold and (now - self.last_alert > cooldown):
-            msg = f"🚨 CROWD ALERT 🚨\nCrowd={crowd_count}\nTime={time.ctime()}"
-            send_telegram_alert(msg)
-            cur.execute("SELECT email FROM users WHERE verified=1")
-            rows = cur.fetchall()
-            if rows:
-                send_email_html(",".join([r[0] for r in rows]),"Crowd Alert",msg,msg)
-            self.last_alert = now
+    filters: dict = {}
+    if selected_repo != "All":
+        filters["repo"] = selected_repo
+    if selected_risk != "All":
+        filters["risk_level"] = selected_risk
+    if selected_decision != "All":
+        filters["decision"] = selected_decision
+    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+        filters["date_from"] = str(date_range[0])
+        filters["date_to"] = str(date_range[1]) + "T23:59:59"
 
-        # WEAPON
-        if weapon_detected:
-            if self.first_seen["weapon"] is None:
-                self.first_seen["weapon"] = now
-            if (now - self.first_seen["weapon"] >= wd) and not self.alerted["weapon"] and (now - self.last_alert > cooldown):
-                msg = f"🚨 WEAPON ALERT 🚨\nDetected={labels_found}\nTime={time.ctime()}"
-                send_telegram_alert(msg)
-                cur.execute("SELECT email FROM users WHERE verified=1")
-                rows = cur.fetchall()
-                if rows:
-                    send_email_html(",".join([r[0] for r in rows]),"Weapon Alert",msg,msg)
-                self.alerted["weapon"] = True
-                self.last_alert = now
-        else:
-            self.first_seen["weapon"] = None
-            self.alerted["weapon"] = False
+    st.sidebar.markdown("---")
+    st.sidebar.caption("Data refreshes on page load.")
 
-        # VIOLENCE
-        if violence_detected:
-            if self.first_seen["violence"] is None:
-                self.first_seen["violence"] = now
-            if (now - self.first_seen["violence"] >= vd) and not self.alerted["violence"] and (now - self.last_alert > cooldown):
-                msg = f"🚨 VIOLENCE ALERT 🚨\nTime={time.ctime()}"
-                send_telegram_alert(msg)
-                cur.execute("SELECT email FROM users WHERE verified=1")
-                rows = cur.fetchall()
-                if rows:
-                    send_email_html(",".join([r[0] for r in rows]),"Violence Alert",msg,msg)
-                self.alerted["violence"] = True
-                self.last_alert = now
-        else:
-            self.first_seen["violence"] = None
-            self.alerted["violence"] = False
+    return filters
 
-        return cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
-# -------------------------
-# STREAMLIT UI
-# -------------------------
-st.set_page_config(page_title="Smart CCTV", layout="wide")
+# ── Review list ──────────────────────────────────────────────────────────────
 
-# CSS
-st.markdown("""
-<style>
-body {
-    background: #030615;
-}
-.card { background:#0f1724; padding:20px; border-radius:10px; margin:20px;}
-</style>
-""", unsafe_allow_html=True)
+def _render_review_list(reviews: list[dict]) -> int | None:
+    """Render a compact list of reviews and return the selected index."""
+    if not reviews:
+        st.info("No reviews found. Reviews appear here automatically after the GitHub Actions bot runs.")
+        return None
 
-# session vars
-if "user" not in st.session_state: st.session_state.user = None
-if "just_registered" not in st.session_state: st.session_state.just_registered = None
-if "show_forgot" not in st.session_state: st.session_state.show_forgot = False
+    st.markdown(f"### Showing **{len(reviews)}** review(s)")
 
-# SIDEBAR
-with st.sidebar:
-    st.title("Navigation")
-    if st.session_state.user:
-        nav = st.radio("",["Monitor","Logout"])
-    else:
-        nav = st.radio("",["Home","Register","Login","Settings"])
-
-if nav=="Logout":
-    st.session_state.user = None
-    st.session_state.show_monitor = False
-    st.rerun()
-
-# -------------------------
-# ROUTES (LOGGED OUT)
-# -------------------------
-
-if not st.session_state.user:
-
-    if nav=="Home":
-        st.header("Real-Time Crowd, Weapon & Violence Detection")
-        col1,col2 = st.columns(2)
-        with col1:
-            st.subheader("System Features")
-            st.write("""
-            - Crowd Counting  
-            - Weapon Detection (Gun/Knife)  
-            - Violence Detection  
-            - Automatic Alerts (Email + Telegram)  
-            - Live WebRTC Streaming  
-            """)
-        with col2:
-            st.image(HERO_IMG, use_container_width=True)
-
-    if nav=="Register":
-        st.subheader("Register")
-        email = st.text_input("Email")
-        pwd = st.text_input("Password", type="password")
-        if st.button("Register"):
-            ok,msg = register_user(email,pwd)
-            if not ok:
-                st.error(msg)
-            else:
-                otp = gen_otp()
-                save_otp(email,otp)
-                if SMTP_EMAIL:
-                    send_email_html(email,"OTP Verification",f"<b>{otp}</b>")
-                st.session_state.just_registered = email
-                st.success("OTP sent to email")
-
-        if st.session_state.just_registered:
-            otp = st.text_input("Enter OTP")
-            if st.button("Verify"):
-                if verify_otp(st.session_state.just_registered, otp):
-                    cur.execute("UPDATE users SET verified=1 WHERE email=?",(st.session_state.just_registered,))
-                    con.commit()
-                    st.session_state.user = st.session_state.just_registered
-                    st.session_state.just_registered = None
-                    st.success("Verified! Redirecting...")
-                    st.rerun()
-                else:
-                    st.error("Wrong/Expired OTP")
-
-    if nav=="Login":
-        st.subheader("Login")
-        email = st.text_input("Email")
-        pwd = st.text_input("Password", type="password")
-        if st.button("Login"):
-            ok,msg = check_login(email,pwd)
-            if ok:
-                st.session_state.user = email
-                st.success("Logged in")
-                st.rerun()
-            else:
-                st.error(msg)
-
-    if nav=="Settings":
-        st.subheader("Public Settings")
-        ct = st.number_input("Crowd threshold",min_value=1,value=settings["crowd_threshold"])
-        wd = st.number_input("Weapon duration (sec)",min_value=0.5,value=settings["weapon_duration"])
-        vd = st.number_input("Violence duration (sec)",min_value=0.5,value=settings["violence_duration"])
-        ac = st.number_input("Alert cooldown (sec)",min_value=1,value=settings["alert_cooldown"])
-        if st.button("Save"):
-            settings["crowd_threshold"] = int(ct)
-            settings["weapon_duration"] = float(wd)
-            settings["violence_duration"] = float(vd)
-            settings["alert_cooldown"] = int(ac)
-            save_settings(settings)
-            st.success("Saved.")
-
-# -------------------------
-# ROUTES (LOGGED IN)
-# -------------------------
-
-else:
-
-    if nav=="Monitor":
-        st.header("Live Monitor")
-
-        mode = st.radio("Source",["Webcam (Live)","Upload Video"],horizontal=True)
-
-        if mode=="Webcam (Live)":
-            rtc_conf = RTCConfiguration({"iceServers":[{"urls":["stun:stun.l.google.com:19302"]}]})
-            webrtc_streamer(
-                key="live",
-                video_transformer_factory=DetectorTransformer,
-                rtc_configuration=rtc_conf,
-                media_stream_constraints={"video":True,"audio":False},
-                async_transform=True
+    selected_idx: int | None = None
+    for idx, r in enumerate(reviews):
+        with st.container():
+            cols = st.columns([0.5, 3, 1.5, 1, 1, 1.5])
+            cols[0].markdown(f"**#{r.get('pr_number', '?')}**")
+            cols[1].markdown(f"**{r.get('pr_title', 'Untitled')}**  \n`{r.get('repo', '')}`")
+            cols[2].markdown(f"🧑‍💻 {r.get('pr_author', 'unknown')}  \n🌿 `{r.get('branch', '')}`")
+            cols[3].markdown(
+                f"Score: **{r.get('risk_score', '?')}**  \n{_risk_span(r.get('risk_level', ''))}",
+                unsafe_allow_html=True,
             )
+            cols[4].markdown(_decision_badge(r.get("decision", "")), unsafe_allow_html=True)
+            if cols[5].button("View", key=f"view_{idx}"):
+                selected_idx = idx
+            st.divider()
 
-        else:
-            file = st.file_uploader("Upload video",type=["mp4","avi","mov","mkv"])
-            if file:
-                path = "uploaded_video.mp4"
-                open(path,"wb").write(file.getbuffer())
-                cap = cv2.VideoCapture(path)
-                tf = DetectorTransformer()
-                ph = st.empty()
-                fps = cap.get(cv2.CAP_PROP_FPS) or 24
-                wait = 1/fps
-                while cap.isOpened():
-                    ret, frame = cap.read()
-                    if not ret: break
-                    class Tmp:
-                        def to_ndarray(self,format="bgr24"):
-                            return frame
-                    out = tf.transform(Tmp())
-                    ph.image(out,channels="RGB")
-                    time.sleep(wait)
-                cap.release()
-                st.success("Done.")
+    return selected_idx
 
+
+# ── Detailed review view ────────────────────────────────────────────────────
+
+def _render_detail(r: dict) -> None:
+    """Render the full review report for a single PR."""
+    st.markdown("---")
+    st.markdown(f"## 🤖 Review: PR #{r.get('pr_number')} — {r.get('pr_title', '')}")
+
+    # Meta
+    meta_cols = st.columns(4)
+    meta_cols[0].metric("Repository", r.get("repo", ""))
+    meta_cols[1].metric("Author", r.get("pr_author", ""))
+    meta_cols[2].metric("Branch", r.get("branch", ""))
+    meta_cols[3].metric("Commit", (r.get("commit_sha") or "")[:8])
+
+    st.markdown("")
+
+    # ─ 1. Summary
+    st.subheader("1. Pull Request Review Summary")
+    st.markdown(r.get("summary", ""))
+
+    # ─ 2. Risk Assessment
+    st.subheader("2. Risk Assessment")
+    risk_cols = st.columns(4)
+    risk_cols[0].metric("Risk Score", f"{r.get('risk_score', '?')} / 100")
+    risk_cols[1].markdown(f"**Risk Level:** {_risk_span(r.get('risk_level', ''))}", unsafe_allow_html=True)
+    risk_cols[2].markdown(f"**Decision:** {_decision_badge(r.get('decision', ''))}", unsafe_allow_html=True)
+    risk_cols[3].metric("Assessment", r.get("overall_assessment", ""))
+    reasoning = r.get("reasoning", "")
+    if reasoning:
+        st.info(reasoning)
+
+    # ─ 3. File-wise Impact
+    files = r.get("files", [])
+    if files:
+        st.subheader("3. File-wise Impact")
+        file_data = [{"File": f.get("file", ""), "Summary": f.get("summary", "")} for f in files]
+        st.table(file_data)
+
+    # ─ 4. Cross-file Impact
+    cross = r.get("cross_file_impact", [])
+    if cross:
+        st.subheader("4. Cross-file Impact")
+        for c in cross:
+            st.markdown(f"- **{c.get('component', '')}** — {c.get('impact', '')}")
+
+    # ─ 5. Key Issues
+    issues = r.get("issues", [])
+    if issues:
+        st.subheader("5. Key Issues Found")
+        for i, iss in enumerate(issues, 1):
+            sev = iss.get("severity", "Medium")
+            icon = _severity_icon(sev)
+            with st.expander(f"{icon} Issue {i}: [{sev}] {iss.get('file', '')} (line {iss.get('line', '?')})"):
+                st.markdown(f"**Issue:** {iss.get('issue', '')}")
+                st.markdown(f"**Risk:** {iss.get('risk', '')}")
+                affected = iss.get("affected_related_code", [])
+                if affected:
+                    st.markdown("**Affected related code:** " + ", ".join(f"`{a}`" for a in affected))
+                st.markdown(f"**Suggestion:** {iss.get('suggestion', '')}")
+                code = iss.get("suggested_code", "")
+                if code:
+                    st.code(code, language="python")
+
+    # ─ 6. Good Improvements
+    goods = r.get("good_improvements", [])
+    if goods:
+        st.subheader("6. Good Improvements")
+        for g in goods:
+            st.markdown(f"- ✅ {g}")
+
+    # ─ 7. Bad Regressions
+    bads = r.get("bad_regressions", [])
+    if bads:
+        st.subheader("7. Bad Regressions")
+        for b in bads:
+            st.markdown(f"- ❌ {b}")
+
+    # ─ 8. Recommended Actions
+    actions = r.get("recommended_actions", [])
+    if actions:
+        st.subheader("8. Recommended Actions Before Merge")
+        for a in actions:
+            st.markdown(f"- {a}")
+
+    # ─ Timestamp
+    st.markdown("---")
+    st.caption(f"Review generated at {r.get('created_at', 'N/A')}")
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def render_streamlit_dashboard() -> None:
+    filters = _sidebar_filters()
+
+    storage = get_storage()
+    reviews = storage.load_review_results(filters if filters else None)
+
+    # Session-state for selected review
+    if "selected_review_idx" not in st.session_state:
+        st.session_state.selected_review_idx = None
+
+    selected = _render_review_list(reviews)
+    if selected is not None:
+        st.session_state.selected_review_idx = selected
+
+    idx = st.session_state.selected_review_idx
+    if idx is not None and 0 <= idx < len(reviews):
+        _render_detail(reviews[idx])
+
+
+# ── Entrypoint ───────────────────────────────────────────────────────────────
+
+render_streamlit_dashboard()
